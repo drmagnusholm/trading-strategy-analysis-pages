@@ -1993,14 +1993,19 @@
         };
 
         const parseCustomTable = (text, headerMode = "auto") => {
-            const rows = text
+            const lines = text
                 .split(/\r?\n/)
                 .map((line) => line.trim())
-                .filter(Boolean)
-                .map(splitSeriesLine);
-            const firstRow = rows[0] || [];
+                .filter(Boolean);
+            const firstLine = lines[0] || "";
+            const firstRow = splitSeriesLine(firstLine);
             const hasDetectedHeader = firstRow.some((token) => parseNumericToken(token) === null && parseDateTokenMs(token) === null);
             const hasHeader = headerMode === "yes" || (headerMode !== "no" && hasDetectedHeader);
+            // A delimited header disambiguates Unix-timestamp CSV rows from decimal-comma values.
+            const delimiter = hasHeader && firstRow.length > 1
+                ? (firstLine.includes("\t") ? "\t" : firstLine.includes(";") ? ";" : firstLine.includes(",") ? "," : null)
+                : null;
+            const rows = lines.map(line => delimiter ? splitDelimitedLine(line, delimiter) : splitSeriesLine(line));
             const dataRows = hasHeader ? rows.slice(1) : rows;
             const columnCount = Math.max(0, ...rows.map((row) => row.length));
             const headers = Array.from({ length: columnCount }, (_, index) => makeColumnLabel(hasHeader ? firstRow[index] : "", index));
@@ -2066,19 +2071,23 @@
             const table = parseCustomTable(text, options.headerMode || "auto");
             const timeColumnIndex = detectTimeColumnIndex(table, options.timeColumn ?? "auto");
             const valueColumnIndex = detectValueColumnIndex(table, options.type || "simple", timeColumnIndex, options.valueColumn ?? "auto");
-            const values = [];
-            const timestamps = [];
-            let startdate = null;
-            table.dataRows.forEach((row) => {
+            const observations = [];
+            table.dataRows.forEach((row, index) => {
                 const value = parseNumericToken(row[valueColumnIndex]);
-                if (value !== null) {
-                    values.push(value);
-                    const timestamp = timeColumnIndex >= 0 ? parseDateTokenMs(row[timeColumnIndex]) : null;
-                    if (timestamp !== null) timestamps.push(timestamp);
-                    if (startdate === null && timestamp !== null) startdate = timestamp;
+                if (value === null) return;
+                const timestamp = timeColumnIndex >= 0 ? parseDateTokenMs(row[timeColumnIndex]) : null;
+                if (timeColumnIndex >= 0 && timestamp === null) {
+                    throw new Error(`Missing or invalid date in data row ${index + 1}. Correct the date or select None for the date/time column.`);
                 }
+                observations.push({ value, timestamp });
             });
-            return { ...table, values, timestamps: timestamps.length === values.length ? timestamps : null, startdate, valueColumnIndex, timeColumnIndex };
+            const hasDates = timeColumnIndex >= 0 && observations.length > 0;
+            // Keep dates paired with values and sort prices before calculating their returns.
+            // Stable sorting preserves input order when observations share a timestamp.
+            if (hasDates) observations.sort((a, b) => a.timestamp - b.timestamp);
+            const values = observations.map(row => row.value);
+            const timestamps = hasDates ? observations.map(row => row.timestamp) : null;
+            return { ...table, values, timestamps, startdate: timestamps?.[0] ?? null, valueColumnIndex, timeColumnIndex };
         };
 
         const valuesToLogReturns = (values, type) => {
@@ -2119,7 +2128,7 @@
                 });
                 const seriesStartdate = logReturnTimestamps?.[0] ?? startdate;
                 setReferenceSeries(logReturns, seriesStartdate, tpy, type === "price" ? "Custom price series" : "Custom return series", logReturnTimestamps);
-                const timestampNote = parsedSeries.startdate !== null ? ` Start date read from Unix timestamp: ${formatDate(parsedSeries.startdate)}.` : "";
+                const timestampNote = parsedSeries.startdate !== null ? ` Dates sorted oldest to newest, starting ${formatDate(parsedSeries.startdate)}.` : "";
                 const valueColumnNote = parsedSeries.headers[parsedSeries.valueColumnIndex] ? ` Column: ${parsedSeries.headers[parsedSeries.valueColumnIndex]}.` : "";
                 setStatus(`Custom series analyzed: ${logReturns.length.toLocaleString()} log returns.${valueColumnNote}${timestampNote}`);
             } catch (error) {
@@ -3515,6 +3524,7 @@
                                 <div class="field full">
                                     <label for="custom-series-input">Paste data</label>
                                     <textarea id="custom-series-input" spellcheck="false" placeholder="One value per line, or CSV rows like date,value. Percent signs are supported."></textarea>
+                                    <p class="panel-note">Dated rows are sorted oldest to newest before analysis, including price-to-return conversion. Without a date/time column, values stay in the supplied order.</p>
                                 </div>
                             </div>
                             <div class="button-row">
