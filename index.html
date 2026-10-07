@@ -1376,12 +1376,8 @@
             }
             return newuwlr;
         }
-        const leverageLogModel = (logReturns, leverage) => {
-            return logReturns.map((lr) => {
-                const grossReturn = 1 + leverage * (Math.exp(lr) - 1);
-                return grossReturn > 0 ? Math.log(grossReturn) : Math.log(Number.EPSILON);
-            });
-        }
+        const leverageLogModel = (logReturns, leverage, tpy = 8760, interestRate = 0) =>
+            StrategyAnalytics.leveragedLogReturns(logReturns, leverage, tpy, interestRate);
         const modelParams = (lr, tpy = 8760, interestRate = 0) => {
             const p = StrategyAnalytics.parameters(lr, tpy, interestRate);
             return { interestRate, CAGR:p.cagr, CAGR0:Math.expm1(p.mu), mu:p.mu + interestRate,
@@ -1648,7 +1644,7 @@
             return plot;
         }
             */
-        const plotLeverageReturns = (acclr, acclevlr, accmaxlr, startdate, tpy = 8760, timestamps = null) => {
+        const plotLeverageReturns = (acclr, acclevlr, accmaxlr, startdate, tpy = 8760, timestamps = null, interestRate = 0) => {
             const points = Math.max(2, Math.min(1000, acclr.length, acclevlr.length, accmaxlr.length));
 
             const data = d3.range(points).map((v, i) => {
@@ -1658,6 +1654,7 @@
                     acc: Math.exp(acclr[index]),
                     accmax: Math.exp(accmaxlr[index]),
                     acclev: Math.exp(acclevlr[index]),
+                    cash: Math.exp((index + 1) * interestRate / tpy),
                 };
             });
             const plot = Plot.plot({
@@ -1670,6 +1667,7 @@
                     Plot.lineY(data, { x: "t", y: "acc", stroke: "#000077", strokeOpacity: 0.5 }),
                     Plot.lineY(data, { x: "t", y: "accmax", stroke: "#007700", strokeOpacity: 0.5 }),
                     Plot.lineY(data, { x: "t", y: "acclev", stroke: "#770000", strokeOpacity: 0.5 }),
+                    Plot.lineY(data, { x: "t", y: "cash", stroke: "#617086", strokeDasharray: "5,4", title: () => "Cash interest" }),
                     Plot.crosshairX(data, { x: "t", y: "acclev", stroke: "#220077", strokeOpacity: 0.5 }),
 
                     Plot.frame()
@@ -1769,7 +1767,8 @@
             const leverage = kleverage === 0 ? 0 : kleverage * (Number.isFinite(optimal) ? optimal : 1);
             const lr = toolSimpleLeverage.seriesReference.logReturns;
             const timestamps = toolSimpleLeverage.seriesReference.timestamps;
-            toolSimpleLeverage.seriesLeverage = modelSeries(leverageLogModel(lr, leverage), toolSimpleLeverage.startdate, toolSimpleLeverage.tpy, timestamps);
+            const interestRate = toolSimpleLeverage.seriesReference.params.interestRate;
+            toolSimpleLeverage.seriesLeverage = modelSeries(leverageLogModel(lr, leverage, tpy, interestRate), toolSimpleLeverage.startdate, tpy, timestamps, interestRate);
             //const newLr = lr.map((lr) => Math.log(1 + leverage * (Math.exp(lr) - 1)));
 
             const tradingVolume = toolSimpleLeverage.seriesLeverage.logReturns.map((lrx, i) => leverage * (1 - Math.exp(lr[i] - lrx)));
@@ -1787,8 +1786,8 @@
 
             replacePlot("plotUnderWater", plotUnderWater(toolSimpleLeverage.seriesLeverage.underWaterLogReturns, toolSimpleLeverage.seriesLeverage.startdate, toolSimpleLeverage.seriesLeverage.tpy, toolSimpleLeverage.seriesLeverage.timestamps));
             replacePlot("plotDrawdownProfile", plotDrawdownProfile(toolSimpleLeverage.seriesLeverage));
-            replacePlot("plotUnderwaterDurations", plotUnderwaterDurations(toolSimpleLeverage.seriesLeverage.accumulatedLogReturns, toolSimpleLeverage.seriesLeverage.athLogReturns, toolSimpleLeverage.seriesLeverage.underWaterDurations, toolSimpleLeverage.seriesLeverage.startdate, toolSimpleLeverage.seriesLeverage.tpy, toolSimpleLeverage.seriesLeverage.timestamps));
-            replacePlot("plotLeverageReturns", plotLeverageReturns(toolSimpleLeverage.seriesReference.accumulatedLogReturns, toolSimpleLeverage.seriesLeverage.accumulatedLogReturns, toolSimpleLeverage.seriesMax.accumulatedLogReturns, toolSimpleLeverage.startdate, toolSimpleLeverage.tpy, toolSimpleLeverage.seriesReference.timestamps));
+            replacePlot("plotUnderwaterDurations", plotUnderwaterDurations(toolSimpleLeverage.seriesLeverage.accumulatedRelativeLogReturns, toolSimpleLeverage.seriesLeverage.relativeAthLogReturns, toolSimpleLeverage.seriesLeverage.underWaterDurations, toolSimpleLeverage.seriesLeverage.startdate, toolSimpleLeverage.seriesLeverage.tpy, toolSimpleLeverage.seriesLeverage.timestamps));
+            replacePlot("plotLeverageReturns", plotLeverageReturns(toolSimpleLeverage.seriesReference.accumulatedLogReturns, toolSimpleLeverage.seriesLeverage.accumulatedLogReturns, toolSimpleLeverage.seriesMax.accumulatedLogReturns, toolSimpleLeverage.startdate, toolSimpleLeverage.tpy, toolSimpleLeverage.seriesReference.timestamps, interestRate));
             replacePlot("plotDrawdownTimeProfile", plotDrawdownTimeProfile(toolSimpleLeverage.seriesLeverage));
 
             updateSeriesSummary();
@@ -1828,6 +1827,18 @@
             return clamp(Number(slider?.value || 0), 0, 200) / 100;
         };
 
+        const currentInterestRate = () => {
+            const field = document.getElementById("interest-rate");
+            try {
+                const rate = StrategyAnalytics.logInterestRate(asNumber("interest-rate", NaN) / 100);
+                field?.setCustomValidity("");
+                return rate;
+            } catch (error) {
+                field?.setCustomValidity(error.message);
+                throw error;
+            }
+        };
+
         const updateSliderReadout = () => {
             const value = currentLeverageFraction();
             const readout = document.getElementById("slider-readout");
@@ -1859,7 +1870,7 @@
             return { mu, sigma, years, tpy, startdate };
         };
 
-        const modelSeries = (logReturns, startdate, tpy = 8760, timestamps = null) => {
+        const modelSeries = (logReturns, startdate, tpy = 8760, timestamps = null, interestRate = 0) => {
             const series = {};
             series.logReturns = logReturns.map(Number).filter(Number.isFinite);
             series.tpy = Number(tpy);
@@ -1867,18 +1878,20 @@
             series.timestamps = Array.isArray(timestamps)
                 ? timestamps.map(Number).filter(Number.isFinite).slice(0, series.logReturns.length)
                 : null;
-            series.params = modelParams(series.logReturns, series.tpy, 0);
-            series.underWaterLogReturns = underWater(series.logReturns);
+            series.params = modelParams(series.logReturns, series.tpy, interestRate);
+            series.relativeLogReturns = StrategyAnalytics.relativeLogReturns(series.logReturns, series.tpy, interestRate);
+            series.underWaterLogReturns = underWater(series.relativeLogReturns);
             series.sortedUnderWaterLogReturns = [...series.underWaterLogReturns].sort((a, b) => b - a);
 
             series.accumulatedLogReturns = accumulate(series.logReturns);
-            series.athLogReturns = lrATH(series.logReturns);
+            series.accumulatedRelativeLogReturns = accumulate(series.relativeLogReturns);
+            series.relativeAthLogReturns = lrATH(series.relativeLogReturns);
             series.underWaterDurations = underWaterDurations(series.underWaterLogReturns);
             seriesAddCdfDurations(series);
             return series;
 
         }
-        const setReferenceSeries = (logReturns, startdate, tpy, sourceLabel, timestamps = null) => {
+        const setReferenceSeries = (logReturns, startdate, tpy, sourceLabel, timestamps = null, interestRate = currentInterestRate()) => {
             const cleanLogReturns = logReturns.map(Number).filter(Number.isFinite);
             const cleanTpy = Number(tpy);
             const cleanStartdate = Number(startdate);
@@ -1888,6 +1901,7 @@
             if (cleanLogReturns.length < 2) throw new Error("Add at least two valid return observations.");
             if (!Number.isFinite(cleanTpy) || cleanTpy <= 0) throw new Error("Ticks per year must be greater than zero.");
             if (!Number.isFinite(cleanStartdate)) throw new Error("Start date is invalid.");
+            if (!Number.isFinite(interestRate)) throw new Error("Interest rate must be finite.");
 
             toolSimpleLeverage.startdate = cleanStartdate;
             toolSimpleLeverage.years = cleanLogReturns.length / cleanTpy;
@@ -1899,12 +1913,12 @@
                 strategyName.value = sourceLabel;
                 strategyName.dataset.autoName = sourceLabel;
             }
-            toolSimpleLeverage.seriesReference = modelSeries(cleanLogReturns, cleanStartdate, cleanTpy, cleanTimestamps);
+            toolSimpleLeverage.seriesReference = modelSeries(cleanLogReturns, cleanStartdate, cleanTpy, cleanTimestamps, interestRate);
             const kellyMaxLeverage = Number.isFinite(toolSimpleLeverage.seriesReference.params.wstar0)
                 ? toolSimpleLeverage.seriesReference.params.wstar0
                 : 1;
-            toolSimpleLeverage.seriesMax = modelSeries(leverageLogModel(cleanLogReturns, kellyMaxLeverage), cleanStartdate, cleanTpy, cleanTimestamps);
-            toolSimpleLeverage.seriesLeverage = modelSeries(cleanLogReturns, cleanStartdate, cleanTpy, cleanTimestamps);
+            toolSimpleLeverage.seriesMax = modelSeries(leverageLogModel(cleanLogReturns, kellyMaxLeverage, cleanTpy, interestRate), cleanStartdate, cleanTpy, cleanTimestamps, interestRate);
+            toolSimpleLeverage.seriesLeverage = modelSeries(cleanLogReturns, cleanStartdate, cleanTpy, cleanTimestamps, interestRate);
             updateSeriesSummary();
             updateSliderReadout();
             leveragePlots(currentLeverageFraction());
@@ -2481,8 +2495,33 @@
                     skewness: m2 > 0 ? m3 / n / populationVariance ** 1.5 : NaN,
                     kurtosis: m2 > 0 ? m4 / n / populationVariance ** 2 : NaN };
             }
+            function logInterestRate(annualRate) {
+                if (!Number.isFinite(annualRate) || annualRate <= -1)
+                    throw new Error("Annual interest rate must be finite and greater than -100%.");
+                return Math.log1p(annualRate);
+            }
+            // Model rates are annual log rates; convert effective user input once at the boundary.
+            function relativeLogReturns(lr, tpy, rate = 0) {
+                if (!Number.isFinite(tpy) || tpy <= 0) throw new Error("Ticks per year must be greater than zero.");
+                if (!Number.isFinite(rate)) throw new Error("Interest rate must be finite.");
+                const cashLogReturn = rate / tpy;
+                return lr.map(x => x - cashLogReturn);
+            }
+            function leveragedLogReturns(lr, leverage, tpy, rate = 0) {
+                if (!Number.isFinite(leverage)) throw new Error("Leverage must be finite.");
+                const relative = relativeLogReturns(lr, tpy, rate), cashLogReturn = rate / tpy;
+                if (leverage === 1) return lr.slice();
+                // Gross wealth factor = L * exp(lr) + (1 - L) * exp(rate / tpy).
+                // Cash earns interest below 1x; borrowing pays interest above 1x.
+                return relative.map(x => {
+                    const change = leverage * Math.expm1(x);
+                    return cashLogReturn + (change > -1 ? Math.log1p(change) : Math.log(Number.EPSILON));
+                });
+            }
             function parameters(lr, tpy, rate = 0) {
-                const m = moments(lr), mu = m.mean * tpy, mu0 = mu - rate;
+                // Subtract cash before averaging, keeping a cash-only series exactly flat.
+                const m = moments(rate === 0 ? lr : relativeLogReturns(lr, tpy, rate));
+                const mu0 = m.mean * tpy, mu = mu0 + rate;
                 const variance = m.variance * tpy, sigma = Math.sqrt(variance);
                 const sharpe = sigma > 0 ? (mu0 + variance / 2) / sigma : NaN;
                 const lambda = variance > 0 ? (mu0 + variance / 2) / variance : NaN;
@@ -2529,9 +2568,12 @@
                 return { ascending, recent, olderRows };
             }
             function metrics(series) {
-                const lr = series.logReturns, p = parameters(lr, series.tpy, series.params?.interestRate || 0);
+                const gross = series.logReturns, rate = series.params?.interestRate || 0;
+                const lr = series.relativeLogReturns || relativeLogReturns(gross, series.tpy, rate);
+                const p = parameters(gross, series.tpy, rate);
                 const n = lr.length, f = series.tpy;
-                p.muGross = p.mu + p.rate; p.cagrExcess = Math.expm1(p.mu);
+                p.muGross = p.mu + rate; p.cagrExcess = Math.expm1(p.mu);
+                p.rate = Math.expm1(rate); // Tables and CSV report the effective annual rate.
                 let total = 0, peak = 0, minDD = 0, drawdown = 0, squaredDrawdown = 0;
                 let peakIndex = 0, underwater = 0, longestDuration = 0, wasUnderwater = false;
                 for (let i = 0; i < n; i++) {
@@ -2548,14 +2590,14 @@
                     }
                     minDD = Math.min(minDD, drawdown); squaredDrawdown += drawdown * drawdown;
                 }
-                p.mdd = n ? minDD : NaN; p.itd = n ? Math.expm1(total) : NaN;
+                p.mdd = n ? minDD : NaN; p.itd = n ? Math.expm1(gross.reduce((sum, x) => sum + x, 0)) : NaN;
                 p.currentDrawdown = n ? drawdown : NaN;
                 p.maxDrawdownDuration = n ? longestDuration / f : NaN;
                 p.timeUnderwater = n ? underwater / n : NaN;
                 // Full-history Ulcer Index, including initial equity of 1:
                 // https://www.tangotools.com/ui/ui.htm
                 p.ulcerIndex = n ? Math.sqrt(squaredDrawdown / n) : NaN;
-                p.calmar = p.mdd < 0 ? p.cagr / Math.abs(p.mdd) : NaN;
+                p.calmar = p.mdd < 0 ? p.cagrExcess / Math.abs(p.mdd) : NaN;
                 const simple = lr.map(x => Math.expm1(x)), simpleMoments = moments(simple);
                 let downsideSquared = 0, gains = 0, losses = 0, positive = 0;
                 for (const r of simple) {
@@ -2570,7 +2612,7 @@
                 p.sortino = p.downsideDeviation > 0 ? simpleMoments.mean * f / p.downsideDeviation : NaN;
                 p.omega = losses > 0 ? gains / losses : NaN;
                 p.sharpeSimple = simpleMoments.variance > 0
-                    ? (simpleMoments.mean - Math.expm1(p.rate / f)) * Math.sqrt(f / simpleMoments.variance) : NaN;
+                    ? simpleMoments.mean * Math.sqrt(f / simpleMoments.variance) : NaN;
                 p.positivePeriods = n ? positive / n : NaN;
                 simple.sort((a, b) => a - b);
                 p.bestPeriod = n ? simple[n - 1] : NaN; p.worstPeriod = n ? simple[0] : NaN;
@@ -2590,11 +2632,11 @@
                 p.mvar = p.mu > 0 ? -Math.expm1(Math.log(0.05) * p.R) : NaN;
                 for (const months of [3, 6]) {
                     const n = Math.max(1, Math.round(series.tpy * months / 12));
-                    const tail = lr.length >= n ? lr.slice(-n) : [];
+                    const tail = gross.length >= n ? gross.slice(-n) : [];
                     p[`rollingReturn${months}`] = tail.length ? Math.expm1(tail.reduce((a, b) => a + b, 0)) : NaN;
                     p[`rollingStd${months}`] = tail.length > 1 ? Math.sqrt(moments(tail).variance * series.tpy) : NaN;
                 }
-                const rows = calendar(lr, series.timestamps, series.startdate, series.tpy);
+                const rows = calendar(gross, series.timestamps, series.startdate, series.tpy);
                 const monthValues = rows.ascending.flatMap(r => r.months.filter(x => x !== null));
                 p.positiveMonths = monthValues.length ? monthValues.filter(x => x > 0).length / monthValues.length : NaN;
                 p.bestMonth = monthValues.length ? Math.expm1(monthValues.reduce((a, b) => Math.max(a, b))) : NaN;
@@ -2741,7 +2783,7 @@
                 progress(samples, samples);
                 return { uncertainty, correlations, model, samples, seed, n, rng: 'xoshiro128**-1.1' };
             }
-            return { moments, parameters, volatilityStandardError, calendar, metrics, autocorrelations, seededRandom, quantile, distribution, bootstrap, corrKeys };
+            return { moments, logInterestRate, relativeLogReturns, leveragedLogReturns, parameters, volatilityStandardError, calendar, metrics, autocorrelations, seededRandom, quantile, distribution, bootstrap, corrKeys };
         }
         const StrategyAnalytics = createStrategyAnalytics();
     </script>
@@ -2826,20 +2868,20 @@
         const analysisState = { saved: [], nextId: 1, revision: 0, worker: null, token: 0, timer: null, result: null, resultKey: null, runningKey: null, cancelledKey: null, lastRenderWidth: 0 };
         const analysisCache = new WeakMap();
         const escapeAnalysis = value => String(value).replace(/[&<>"']/g, ch => ({'&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;'}[ch]));
-        const analysisNumber = (v, digits = 4) => Number.isFinite(v) ? (Math.abs(v) >= 1e7 ? v.toExponential(3) : v.toLocaleString('en-US', {maximumFractionDigits: digits, minimumFractionDigits: digits})) : '—';
+        const analysisNumber = (v, digits = 4) => Number.isFinite(v) ? (Math.abs(v) >= 1e7 ? v.toExponential(digits) : v.toLocaleString('en-US', {maximumFractionDigits: digits, minimumFractionDigits: digits})) : '—';
         const analysisPercent = v => Number.isFinite(v) ? `${analysisNumber(v * 100, 2)}%` : '—';
         const analysisMetricRows = [
             ['Sample & performance'],
-            ['tpy', 'Ticks per year', 'number', 'Annualization frequency supplied with this series.'],
+            ['tpy', 'Ticks per year', 'integer', 'Annualization frequency supplied with this series.'],
             ['ticks', 'Observations', 'integer', 'Number of periodic log returns.'],
             ['elapsed', 'Elapsed time (years)', 'number', 'Observations / ticks per year; gaps in calendar dates are not filled.'],
             ['cagr', 'Return (annualized / CAGR)', 'percent', 'exp(tpy × mean(log returns)) − 1.'],
-            ['cagrExcess', 'CAGR₀ · excess growth', 'percent', 'exp(μ₀) − 1. Gross CAGR adjusted for the continuously compounded interest rate; equals CAGR at a zero rate.'],
+            ['cagrExcess', 'CAGR₀ · excess growth', 'percent', 'exp(μ₀) − 1. Growth relative to cash; equals CAGR at a zero interest rate.'],
             ['itd', 'Inception to date', 'percent', 'exp(sum(log returns)) − 1.'],
-            ['rate', 'Interest rate', 'percent', 'Annual continuously compounded rate; the existing leverage model uses zero.'],
+            ['rate', 'Interest rate', 'percent', 'Effective annual cash and borrowing rate r saved with this strategy. The per-observation log cash return is log(1 + r) / ticks per year.'],
             ['Model parameters'],
-            ['muGross', 'μ · gross annual log drift', 'percent', 'tpy × mean(log returns), before subtracting the interest rate.'],
-            ['mu', 'μ₀ · annual log drift', 'percent', 'tpy × mean(log returns) − interest rate.'],
+            ['muGross', 'μ · gross annual log drift', 'percent', 'tpy × mean(log returns), before subtracting log(1 + annual interest rate).'],
+            ['mu', 'μ₀ · annual log drift', 'percent', 'tpy × mean(log returns) − log(1 + annual interest rate).'],
             ['sigma', 'σ₀ · annual volatility', 'percent', 'sqrt(tpy) × sample standard deviation (n − 1 denominator).'],
             ['sharpe', 's₀ · model Sharpe ratio', 'number', '(μ₀ + σ₀²/2) / σ₀, as in Holm; zero volatility is undefined.'],
             ['R', 'R₀ · drawdown risk', 'number', 'σ₀² / (2μ₀). Signed model parameter; stationary drawdown interpretation requires μ₀ > 0.'],
@@ -2848,26 +2890,26 @@
             ['k', 'k₀ · relative Kelly', 'number', '1/λ*.'],
             ['lambda', 'λ* = w₀* · optimal leverage', 'number', 'μ₀ / σ₀² + 1/2. The former portfolio table’s w₀* and uncertainty panel’s λ* are the same parameter.'],
             ['tauMin', 'τmin = τₛ₀ · minimum time (years)', 'number', '1/s₀². τmin and Holm’s τₛ₀ denote the same parameter.'],
-            ['Risk-adjusted performance'],
-            ['sharpeSimple', 'Sharpe ratio · simple returns', 'number', 'sqrt(f) × [mean(r) − expm1(rate/f)] / sample SD(r), where r = exp(log return) − 1 and f is ticks per year.'],
-            ['sortino', 'Sortino ratio · 0% target', 'number', 'f × mean(r) / annual downside deviation, using simple periodic returns and a zero target. Undefined with no downside deviation.'],
-            ['calmar', 'Calmar ratio · full history', 'number', 'CAGR / abs(maximum drawdown), over the full available history. Undefined with no drawdown.'],
-            ['omega', 'Omega ratio · 0% threshold', 'number', 'sum(max(r, 0)) / sum(max(−r, 0)), using simple periodic returns. Undefined with no losses.'],
-            ['Drawdown & downside risk'],
+            ['Risk-adjusted performance · relative to cash'],
+            ['sharpeSimple', 'Sharpe ratio · simple returns', 'number', 'sqrt(f) × mean(r₀) / sample SD(r₀), where r₀ = exp(log return − log(1 + rate)/f) − 1, rate is effective annual interest, and f is ticks per year. Equivalently, subtract the simple cash return from gross simple returns in the standard Sharpe formula.'],
+            ['sortino', 'Sortino ratio · 0% target', 'number', 'f × mean(r₀) / annual downside deviation, using simple returns relative to cash and a zero excess-return target. Undefined with no downside deviation.'],
+            ['calmar', 'Calmar ratio · full history', 'number', 'CAGR₀ / abs(maximum relative drawdown), over the full available history. Undefined with no drawdown.'],
+            ['omega', 'Omega ratio · 0% threshold', 'number', 'sum(max(r₀, 0)) / sum(max(−r₀, 0)), using simple returns relative to cash. Undefined with no losses.'],
+            ['Drawdown & downside risk · relative to cash'],
             ['mdd', 'MDD · maximum drawdown', 'percent', 'Minimum compounded drawdown including the initial equity of 1. Shown as a negative return.'],
             ['currentDrawdown', 'Current drawdown', 'percent', 'Compounded decline from the previous equity high at the final observation. Zero at a high.'],
             ['maxDrawdownDuration', 'Longest drawdown (years)', 'number', 'Longest peak-to-recovery interval, or peak-to-final-observation interval if unrecovered. Measured in observations / ticks per year; includes the recovery interval.'],
             ['timeUnderwater', 'Time underwater', 'percent', 'Fraction of observation endpoints below the running equity high. Includes flat periods while below a high.'],
             ['ulcerIndex', 'Ulcer Index · full history', 'percent', 'Root mean square of percentage equity drawdowns over all observations, including the initial equity high of 1. Not annualized.'],
             ['downsideDeviation', 'Downside deviation (annualized)', 'percent', 'sqrt(f × mean(min(r, 0)²)), using simple returns. All observations, including nonnegative ones, enter the denominator.'],
-            ['Return distribution'],
+            ['Return distribution · relative to cash'],
             ['positivePeriods', 'Positive periods', 'percent', 'Positive return observations / all observations, including flat periods in the denominator. Periods are not trades.'],
             ['bestPeriod', 'Best period return', 'percent', 'Largest simple return for one supplied observation interval.'],
             ['worstPeriod', 'Worst period return', 'percent', 'Smallest simple return for one supplied observation interval.'],
             ['skewness', 'Skewness', 'number', 'Third central population moment / variance^(3/2), matching Mathematica Skewness.'],
             ['kurtosis', 'Kurtosis', 'number', 'Fourth central population moment / variance²; Pearson convention (normal = 3).'],
             ['returnVarianceCorrelation', 'Return–variance correlation', 'number', 'skewness / sqrt(kurtosis − 1), as in ModelParametersLr.'],
-            ['Tail risk'],
+            ['Tail risk · relative to cash'],
             ['historicalVar95', 'Historical VaR 95% · 1 period', 'percent', 'Negative empirical 5th-percentile simple return (inverse empirical CDF). Positive means loss; one period is one supplied observation interval.'],
             ['expectedShortfall95', 'Expected shortfall 95% · 1 period', 'percent', 'Negative mean of the worst 5% probability mass of simple returns, weighting the boundary observation fractionally. Positive means loss.'],
             ['varDay', 'VaR 95% · 1 day', 'percent', '1 − exp(μ₀/365 − 1.644854 σ₀/√365). Gaussian log-return model, positive loss convention.'],
@@ -2910,7 +2952,7 @@
                 `<thead><tr><th scope="col">Metric</th>${entries.map(e => `<th scope="col" ${columnAttributes(e)}>${escapeAnalysis(e.label)}</th>`).join('')}</tr></thead><tbody>` +
                 analysisMetricRows.map(([key, label, format, definition]) => {
                     if (!label) return `<tr class="metric-group"><th colspan="${entries.length + 1}">${escapeAnalysis(key)}</th></tr>`;
-                    return `<tr data-metric="${key}"><th scope="row" title="${escapeAnalysis(definition)}">${label}</th>` + data.map((p, i) => `<td ${columnAttributes(entries[i])} title="${escapeAnalysis(definition)}">${format === 'percent' ? analysisPercent(p[key]) : analysisNumber(p[key], format === 'integer' ? 0 : 4)}</td>`).join('') + '</tr>';
+                    return `<tr data-metric="${key}"><th scope="row" title="${escapeAnalysis(definition)}">${label}</th>` + data.map((p, i) => `<td ${columnAttributes(entries[i])} title="${escapeAnalysis(definition)}">${format === 'percent' ? analysisPercent(p[key]) : analysisNumber(p[key], format === 'integer' ? 0 : 2)}</td>`).join('') + '</tr>';
                 }).join('') + '</tbody>';
         }
         function renderCalendarReturns(entries) {
@@ -2998,7 +3040,7 @@
             document.getElementById('uncertainty-grid')?.replaceChildren(...Object.entries(uncertaintyLabels).map(([k,[label,axis]]) => distributionCard(label,axis,result.uncertainty[k])));
             document.getElementById('autocorrelation-grid')?.replaceChildren(...StrategyAnalytics.corrKeys.map(k => distributionCard(`${k} · corr(rₜ₋₁${['','','²','³','⁴'][Number(k[1])]}, rₜ${k[2] === '2' ? '²' : ''})`, 'Correlation', result.correlations[k], true)));
             const scope = document.getElementById('autocorrelation-scope');
-            if (scope) scope.textContent = `${result.label} · ${result.samples.toLocaleString()} IID resamples · ${result.n.toLocaleString()} observations per resample · seed ${result.seed}`;
+            if (scope) scope.textContent = `${result.label} · relative to cash at ${analysisPercent(Math.expm1(result.interestRate || 0))} annual interest · ${result.samples.toLocaleString()} IID resamples · ${result.n.toLocaleString()} observations per resample · seed ${result.seed}`;
             analysisState.lastRenderWidth = document.getElementById('uncertainty-grid')?.clientWidth || 0;
         }
         async function runDiagnostics() {
@@ -3010,11 +3052,11 @@
             analysisState.runningKey = key; analysisState.resultKey = null;
             clearDiagnosticPlots('Calculating bootstrap distributions…');
             document.getElementById('cancel-diagnostics').disabled = false;
-            const payload = {lr: entry.series.logReturns, tpy: entry.series.tpy, samples: Number(document.getElementById('bootstrap-samples').value), seed: Number(document.getElementById('bootstrap-seed').value)};
+            const payload = {lr: entry.series.relativeLogReturns, tpy: entry.series.tpy, samples: Number(document.getElementById('bootstrap-samples').value), seed: Number(document.getElementById('bootstrap-seed').value)};
             const progress = (done, total) => { if (token === analysisState.token) setDiagnosticStatus(`${entry.label}: ${done.toLocaleString()} / ${total.toLocaleString()} full-length resamples (${Math.round(done / total * 100)}%)`); };
             const complete = result => {
                 if (token !== analysisState.token || key !== diagnosticKey()) return;
-                analysisState.result = {...result, label:entry.label}; analysisState.resultKey = key;
+                analysisState.result = {...result, label:entry.label, interestRate:entry.series.params.interestRate}; analysisState.resultKey = key;
                 stopDiagnostics(); renderDiagnostics();
                 setDiagnosticStatus(`${entry.label} · ${result.samples.toLocaleString()} full-length IID resamples · seed ${result.seed} · complete`);
             };
@@ -3581,6 +3623,11 @@
                         <input type="range" id="slider" min="0" max="200" value="50">
                         <input type="number" id="slider-value" min="0" max="200" value="50">
                     </div>
+                    <div class="field">
+                        <label for="interest-rate">Effective annual interest rate (%)</label>
+                        <input type="number" id="interest-rate" value="0" step="0.1" aria-describedby="interest-rate-note">
+                    </div>
+                    <p class="panel-note" id="interest-rate-note">Cash and borrowing rate over one year: enter 5 for 5%. Risk calculations use returns relative to cash. Changing the rate keeps the supplied return series.</p>
                 </div>`;
 
             const gaugeWidget = `
@@ -3640,15 +3687,17 @@
                 <button type="button" id="export-metrics" class="btn secondary no-print">Export CSV</button></div>
                 <div class="analysis-scroll"><table id="strategy-metrics" class="analysis-table" aria-label="Portfolio and strategy metrics"></table></div>
                 <details class="analysis-method"><summary>Calculation conventions</summary>
-                <p>Model drift and volatility use log returns. Annual volatility uses sample standard deviation; kurtosis is Pearson (normal = 3). Gross μ/CAGR and excess μ₀/CAGR₀ coincide at the model’s zero interest rate. λ* and w₀* are the same optimal leverage; τmin and τₛ₀ both equal 1/s₀².</p>
-                <p>Observed Sharpe, Sortino, Omega, downside deviation, and historical tail risk use simple returns r = exp(log return) − 1. Sharpe subtracts the periodic interest rate. Sortino and Omega use a 0% target; downside deviation divides by all observations. Annualization uses the supplied ticks per year. Calmar uses full-history CAGR and maximum drawdown. Ratios with zero denominators show —.</p>
+                <p>The supplied series is the unleveraged asset return. The input, metrics table, and CSV use the effective annual interest rate r (5% means r = 0.05). Internally, the annual log rate is q = log(1 + r), with log cash return q/f per observation for f ticks per year. Excess log returns are total log returns minus q/f. Rates must be greater than −100%. Gross CAGR, ITD, recent performance, the calendar, and the return chart show total returns. Risk metrics and all other charts use returns relative to cash.</p>
+                <p>At absolute leverage L, the portfolio’s one-period wealth factor is L × exp(asset log return) + (1 − L) × (1 + r)^(1/f). Uninvested cash earns interest; borrowing pays the same rate. Zero leverage earns the cash rate, and 1× leverage retains the supplied asset returns. Saved comparison strategies retain their rate.</p>
+                <p>Model drift and volatility use log returns. Annual volatility uses sample standard deviation; kurtosis is Pearson (normal = 3). μ₀ = μ − log(1 + r); CAGR₀ = exp(μ₀) − 1. λ* and w₀* are the same optimal leverage; τmin and τₛ₀ both equal 1/s₀².</p>
+                <p>Observed Sharpe, Sortino, Omega, downside deviation, and historical tail risk use simple relative returns r₀ = exp(total log return − q/f) − 1. Sortino and Omega use a 0% excess-return target; downside deviation divides by all observations. Annualization uses the supplied ticks per year. Calmar uses full-history excess CAGR and maximum relative drawdown. Ratios with zero denominators show —.</p>
                 <p>Historical VaR and expected shortfall use one observation interval (one hour for hourly data), not a fixed day. VaR uses the inverse empirical CDF; expected shortfall averages exactly the worst 5% probability mass, including a fractional boundary observation. Positive values mean loss. The separate model VaRs use Gaussian log-return quantiles at 1/365, 1/52 and 1/12 years. Infinite-horizon MVaR = 1 − 0.05^R₀ requires positive drift.</p>
                 <p>Drawdowns include initial equity of 1. Ulcer Index is the root mean square of full-history drawdowns; it is not annualized. Longest drawdown includes completed recovery intervals and any ongoing drawdown, measured in observations / ticks per year. Time underwater is the fraction of observation endpoints below a high.</p>
                 <p>Rolling windows use round(ticks per year × months / 12) observations and require a complete window. Monthly statistics include observed partial months; missing months are excluded. With no dates, timestamps are spaced at 365 days / ticks per year from the supplied start date. Positive periods refer to return observations, not individual trades. CSV exports include every metric and use decimal values, not percentage points.</p>
                 <p>Formula references: <a href="https://www.cmegroup.com/education/files/rr-sortino-a-sharper-ratio.pdf" target="_blank" rel="noopener noreferrer">Sortino and downside deviation</a>, <a href="https://quantopian.github.io/empyrical/_modules/empyrical/stats.html" target="_blank" rel="noopener noreferrer">Sharpe, Calmar and Omega</a>, <a href="https://www.tangotools.com/ui/ui.htm" target="_blank" rel="noopener noreferrer">Ulcer Index</a>, <a href="https://arxiv.org/abs/cond-mat/0105191" target="_blank" rel="noopener noreferrer">expected shortfall</a>.</p></details>`;
             const uncertaintyWidget = `
                 <div class="panel-header"><div><p class="panel-kicker">Sampling uncertainty</p><h2 class="panel-title">Uncertainty Distributions</h2>
-                <p class="panel-note">Seven distributions from Holm’s UncertaintyDistributions. Shared full-length IID bootstrap samples also power the autocorrelation grid below.</p></div></div>
+                <p class="panel-note">Seven distributions from Holm’s UncertaintyDistributions, using returns relative to cash. Shared full-length IID bootstrap samples also power the autocorrelation grid below.</p></div></div>
                 <div class="analysis-toolbar">
                     <div class="field"><label for="diagnostic-strategy">Strategy</label><select id="diagnostic-strategy"><option value="reference">Reference strategy</option></select></div>
                     <div class="field narrow"><label for="bootstrap-samples">Resamples</label><select id="bootstrap-samples"><option value="250">250 · quick</option><option value="1000" selected>1,000 · standard</option><option value="10000">10,000 · Holm default</option></select></div>
@@ -3659,7 +3708,7 @@
                 <p id="diagnostic-status" class="analysis-status" role="status" aria-live="polite">Load a strategy to calculate distributions.</p>
                 <div class="analysis-legend"><span>Histogram & kernel density</span><span class="theory">Normal approximation</span><span class="observed">Observed estimate</span></div>
                 <details class="analysis-method"><summary>Bootstrap method & interpretation</summary>
-                <p>ResampleLrs draws with replacement from the observed log returns, preserving the observation count and removing serial dependence. The displayed 95% intervals are bootstrap percentiles; the periodic-return panel shows the observed distribution. Density bandwidths follow Holm (SD/4 for returns, SD/3 for parameters). Inverse quantities are plotted as in the source: λ* = 1/k₀, A₀ = 1/R₀, and 1/τ₀; reciprocals can diverge around zero.</p>
+                <p>ResampleLrs draws with replacement from relative log returns (total log return − log(1 + annual interest rate) / ticks per year), preserving the observation count and removing serial dependence. The displayed 95% intervals are bootstrap percentiles; the periodic-return panel shows the observed relative-return distribution. Density bandwidths follow Holm (SD/4 for returns, SD/3 for parameters). Inverse quantities are plotted as in the source: λ* = 1/k₀, A₀ = 1/R₀, and 1/τ₀; reciprocals can diverge around zero.</p>
                 <p>The volatility reference curve uses a kurtosis-adjusted IID standard error: SE(σ₀) ≈ (σ₀/2)√[(κ − (n − 3)/(n − 1))/n], where κ is the observed Pearson kurtosis of periodic log returns and n is the observation count. With frequency f ticks per year and T = n/f years, this is approximately σ₀√[(κ − 1)/(4fT)]. Gaussian returns (κ = 3) give σ₀/√(2(n − 1)); heavy tails give a wider uncertainty distribution. Changing frequency changes the observation count and can also change kurtosis when returns are aggregated.</p>
                 <p>The other dashed curves use Holm’s normal approximations. These are reference curves: non-Gaussian returns and nonlinear quantities such as 1/τ₀ = μ₀²/σ₀² can retain skewness. More resamples improve the estimated density; they do not force it to be normal or reduce the underlying uncertainty. These calculations assume IID returns, not dependence-preserving resampling. The time approximation uses |μ₀| for a nonnegative standard deviation.</p>
                 <p>A seeded xoshiro128** generator produces the resampling indices. Undefined draws are omitted and counted. IID resampling does not preserve serial dependence; use the grid below to inspect it.</p></details>
@@ -3672,15 +3721,15 @@
                 <div class="analysis-scroll"><div class="diagnostic-grid" id="autocorrelation-grid"></div></div>`;
 
             const initialLayout = [
-                { id: "return-path-widget", x: 0, y: 0, w: 6, h: 6, content: plotPanel("plotLeverageReturns", "Leverage Return Path", "Unlevered, Kelly max, and selected leverage on one return curve.") },
+                { id: "return-path-widget", x: 0, y: 0, w: 6, h: 6, content: plotPanel("plotLeverageReturns", "Leverage Return Path", "Total returns: unlevered, Kelly max, and selected leverage after cash interest and financing. Dashed line: cash.") },
                 { id: "risk-gauge-widget", x: 6, y: 0, w: 6, h: 6, minH: 6, sizeToContent: true, content: gaugeWidget },
                 { id: "calendar-returns-widget", x: 0, y: 6, w: 12, h: 9, content: calendarWidget },
                 { id: "risk-ladder-widget", x: 0, y: 15, w: 6, h: 5, content: tablePanel("output-leverage-table", "Risk Ladder", "Risk levels translated into relative leverage, absolute leverage, and theoretical return.") },
                 { id: "strategy-metrics-widget", x: 6, y: 15, w: 6, h: 29, content: metricsWidget },
-                { id: "recovery-window-widget", x: 0, y: 20, w: 6, h: 6, content: plotPanel("plotUnderwaterDurations", "Recovery Windows", "Top drawdown duration periods over the compounded path.") },
-                { id: "underwater-depth-widget", x: 0, y: 26, w: 6, h: 6, content: plotPanel("plotUnderWater", "Underwater Depth", "Drawdown from all-time high through time.") },
-                { id: "drawdown-profile-widget", x: 0, y: 32, w: 6, h: 6, content: plotPanel("plotDrawdownProfile", "Drawdown Distribution", "Empirical and theoretical depth confidence profile.") },
-                { id: "duration-profile-widget", x: 0, y: 38, w: 6, h: 6, content: plotPanel("plotDrawdownTimeProfile", "Duration Distribution", "Empirical and theoretical underwater time profile.") },
+                { id: "recovery-window-widget", x: 0, y: 20, w: 6, h: 6, content: plotPanel("plotUnderwaterDurations", "Recovery Windows", "Longest drawdown periods of the compounded returns relative to cash.") },
+                { id: "underwater-depth-widget", x: 0, y: 26, w: 6, h: 6, content: plotPanel("plotUnderWater", "Underwater Depth", "Drawdown from the all-time high of returns relative to cash.") },
+                { id: "drawdown-profile-widget", x: 0, y: 32, w: 6, h: 6, content: plotPanel("plotDrawdownProfile", "Drawdown Distribution", "Empirical and theoretical depth confidence, relative to cash.") },
+                { id: "duration-profile-widget", x: 0, y: 38, w: 6, h: 6, content: plotPanel("plotDrawdownTimeProfile", "Duration Distribution", "Empirical and theoretical underwater time, relative to cash.") },
                 { id: "uncertainty-widget", x: 0, y: 44, w: 12, h: 20, content: uncertaintyWidget },
                 { id: "autocorrelation-widget", x: 0, y: 64, w: 12, h: 18, content: autocorrelationWidget },
             ];
@@ -3817,6 +3866,19 @@
                 };
                 slider.addEventListener("input", () => syncSlider(slider.value));
                 sliderValue.addEventListener("input", () => syncSlider(sliderValue.value));
+                const updateInterestRate = debounce(() => {
+                    const reference = toolSimpleLeverage.seriesReference;
+                    if (!reference) return;
+                    try {
+                        setReferenceSeries(reference.logReturns, reference.startdate, reference.tpy, toolSimpleLeverage.sourceLabel, reference.timestamps);
+                    } catch (error) {
+                        const field = document.getElementById("interest-rate");
+                        field.setCustomValidity(error.message);
+                        field.reportValidity();
+                    }
+                }, 150);
+                document.getElementById("interest-rate").addEventListener("input", updateInterestRate);
+                document.getElementById("interest-rate").addEventListener("change", updateInterestRate);
                 document.getElementById("new-sample").addEventListener("click", runSample);
                 document.getElementById("analyze-custom").addEventListener("click", runCustomSeries);
                 document.getElementById("load-binance-pairs").addEventListener("click", loadBinancePairs);
